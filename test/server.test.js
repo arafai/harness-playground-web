@@ -143,3 +143,36 @@ test("reports an unreachable api as 502 on every proxy route", async () => {
   }
   lonely.close();
 });
+
+test("serves the save form and saved list on the home page", async () => {
+  const html = await (await fetch(`${base}/`)).text();
+  assert.match(html, /<h1>Slug preview<\/h1>/);
+  assert.ok(html.indexOf('id="preview"') < html.indexOf('id="save"'));
+  for (const id of [
+    "eac-2-title-input",
+    "eac-2-save-button",
+    "eac-2-saved-list",
+    "eac-2-item-link",
+    "eac-2-item-slug",
+  ]) {
+    assert.ok(html.includes(id), id);
+  }
+  assert.match(html, /role="alert"/);
+  assert.match(html, /aria-live="polite"/);
+  assert.match(html, /<ol id="saved-list"/);
+  for (const text of ["Loading…", "No saved items yet", "Could not load saved items", "Retry"]) {
+    assert.ok(html.includes(text), text);
+  }
+  assert.ok(html.includes("textContent"));
+  assert.ok(!html.includes("innerHTML"));
+});
+
+test("save flow through the proxy yields slug and link target", async () => {
+  const res = await post("/api/items", { title: "<b>Hi</b>,  There!" });
+  const item = await res.json();
+  assert.equal(item.slug, "b-hi-b-there");
+  assert.equal(item.title, "<b>Hi</b>,  There!");
+  const { items } = await (await fetch(`${base}/api/items`)).json();
+  assert.equal(items.at(-1).slug, "b-hi-b-there");
+  assert.equal((await fetch(`${base}/api/items/${encodeURIComponent(item.slug)}`)).status, 200);
+});
