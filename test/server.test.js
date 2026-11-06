@@ -176,3 +176,40 @@ test("save flow through the proxy yields slug and link target", async () => {
   assert.equal(items.at(-1).slug, "b-hi-b-there");
   assert.equal((await fetch(`${base}/api/items/${encodeURIComponent(item.slug)}`)).status, 200);
 });
+
+test("item page renders title, slug, back link and test ids", async () => {
+  await post("/api/items", { title: "Page  Item" });
+  const res = await fetch(`${base}/items/page-item`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type"), /text\/html/);
+  const html = await res.text();
+  assert.match(html, /<h1 data-testid="eac-2-item-title">Page  Item<\/h1>/);
+  assert.match(html, /<code data-testid="eac-2-item-page-slug">page-item<\/code>/);
+  assert.match(html, /<title>Page  Item – Saved item<\/title>/);
+  assert.match(html, /<a href="\/">Back to saved items<\/a>/);
+});
+
+test("item page escapes script tags and quotes", async () => {
+  const title = `<script>alert("x")</script> 'q' & co`;
+  const item = await (await post("/api/items", { title })).json();
+  const html = await (await fetch(`${base}/items/${encodeURIComponent(item.slug)}`)).text();
+  assert.ok(!html.includes("<script>"));
+  assert.ok(!html.includes('"x"'));
+  assert.match(html, /<h1 data-testid="eac-2-item-title">&#60;script&#62;alert\(&#34;x&#34;\)&#60;\/script&#62; &#39;q&#39; &#38; co<\/h1>/);
+  assert.match(html, /<title>&#60;script&#62;/);
+});
+
+test("item page 404 for unknown slug and 502 for unreachable api", async () => {
+  const missing = await fetch(`${base}/items/nope`);
+  assert.equal(missing.status, 404);
+  assert.match(missing.headers.get("content-type"), /text\/html/);
+  const html = await missing.text();
+  assert.match(html, /Item not found/);
+  assert.match(html, /<a href="\/">/);
+  const lonely = createWeb({ apiUrl: "http://127.0.0.1:9" });
+  const lonelyBase = await listen(lonely);
+  const bad = await fetch(`${lonelyBase}/items/x`);
+  assert.equal(bad.status, 502);
+  assert.match(bad.headers.get("content-type"), /text\/html/);
+  lonely.close();
+});

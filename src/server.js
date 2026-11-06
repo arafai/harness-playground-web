@@ -104,6 +104,25 @@ const PAGE = `<!doctype html>
 </body>
 </html>`;
 
+const escapeHtml = (value) =>
+  String(value).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+const STYLE = `<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{font-family:sans-serif;max-width:40rem;margin:0 auto;padding:1rem}h1{overflow-wrap:anywhere}</style>`;
+
+function itemPage(title, body) {
+  return `<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+${STYLE}</head>
+<body>
+${body}
+</body>
+</html>`;
+}
+
+const BACK = '<p><a href="/">Back to saved items</a></p>';
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -132,6 +151,37 @@ export function createWeb({ apiUrl }) {
     }
   }
 
+  // Server-rendered item page; the api's status decides which page is shown.
+  async function renderItem(res, slug) {
+    const send = (status, html) => {
+      res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+      return res.end(html);
+    };
+    const unavailable = (why) =>
+      send(502, itemPage("Saved item unavailable", `<h1>Saved item unavailable</h1>\n<p>${why}</p>\n${BACK}`));
+    let status;
+    let item;
+    try {
+      const upstream = await fetch(`${apiUrl}/items/${encodeURIComponent(slug)}`);
+      status = upstream.status;
+      const text = await upstream.text();
+      if (status === 200) item = JSON.parse(text);
+    } catch {
+      return unavailable("The api is unreachable.");
+    }
+    if (status === 404) {
+      return send(404, itemPage("Item not found", `<h1>Item not found</h1>\n${BACK}`));
+    }
+    if (!item) return unavailable("The api returned an unexpected response.");
+    return send(
+      200,
+      itemPage(
+        `${item.title} – Saved item`,
+        `<h1 data-testid="eac-2-item-title">${escapeHtml(item.title)}</h1>\n<p>Slug: <code data-testid="eac-2-item-page-slug">${escapeHtml(item.slug)}</code></p>\n${BACK}`,
+      ),
+    );
+  }
+
   return createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/health") {
@@ -158,6 +208,14 @@ export function createWeb({ apiUrl }) {
         slug = decodeURIComponent(slug);
       } catch {}
       return proxy(res, `/items/${encodeURIComponent(slug)}`);
+    }
+    const pageMatch = /^\/items\/([^/]+)$/.exec(url.pathname);
+    if (req.method === "GET" && pageMatch) {
+      let slug = pageMatch[1];
+      try {
+        slug = decodeURIComponent(slug);
+      } catch {}
+      return renderItem(res, slug);
     }
     res.writeHead(404, { "content-type": "application/json" });
     return res.end(JSON.stringify({ error: "not found" }));
