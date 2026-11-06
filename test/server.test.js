@@ -14,10 +14,40 @@ let base;
 
 before(async () => {
   // A stand-in for the api platform.
-  api = createServer((req, res) => {
-    const text = new URL(req.url, "http://localhost").searchParams.get("text");
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ slug: `slug:${text}` }));
+  const items = [];
+  const send = (res, status, body) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+  api = createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/slug") {
+      return send(res, 200, { slug: `slug:${url.searchParams.get("text")}` });
+    }
+    if (url.pathname === "/items" && req.method === "GET") return send(res, 200, { items });
+    if (url.pathname === "/items" && req.method === "POST") {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      let title;
+      try {
+        title = JSON.parse(raw).title;
+      } catch {}
+      if (typeof title !== "string" || !title.trim()) {
+        return send(res, 400, { error: "title is required" });
+      }
+      const stem = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      let slug = stem;
+      for (let n = 2; items.some((i) => i.slug === slug); n++) slug = `${stem}-${n}`;
+      const item = { id: items.length + 1, title, slug };
+      items.push(item);
+      return send(res, 201, item);
+    }
+    const match = /^\/items\/(.+)$/.exec(url.pathname);
+    if (match && req.method === "GET") {
+      const item = items.find((i) => i.slug === decodeURIComponent(match[1]));
+      return item ? send(res, 200, item) : send(res, 404, { error: "not found" });
+    }
+    return send(res, 404, { error: "not found" });
   });
   web = createWeb({ apiUrl: await listen(api) });
   base = await listen(web);
@@ -45,5 +75,71 @@ test("reports an unreachable api as 502", async () => {
   const lonely = createWeb({ apiUrl: "http://127.0.0.1:9" });
   const lonelyBase = await listen(lonely);
   assert.equal((await fetch(`${lonelyBase}/api/slug?text=x`)).status, 502);
+  lonely.close();
+});
+
+const post = (path, body) =>
+  fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+test("proxies POST /api/items with body and status", async () => {
+  const res = await post("/api/items", { title: "Hello,  World!" });
+  assert.equal(res.status, 201);
+  assert.deepEqual(await res.json(), { id: 1, title: "Hello,  World!", slug: "hello-world" });
+  const bad = await post("/api/items", { title: " " });
+  assert.equal(bad.status, 400);
+  assert.deepEqual(await bad.json(), { error: "title is required" });
+});
+
+test("proxies the item list", async () => {
+  await post("/api/items", { title: "Hello,  World!" });
+  const res = await fetch(`${base}/api/items`);
+  assert.equal(res.status, 200);
+  const { items } = await res.json();
+  assert.deepEqual(items.map((i) => i.slug), ["hello-world", "hello-world-2"]);
+});
+
+test("proxies an item by slug and forwards 404", async () => {
+  const ok = await fetch(`${base}/api/items/hello-world-2`);
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).title, "Hello,  World!");
+  const missing = await fetch(`${base}/api/items/nope`);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "not found" });
+});
+
+test("URL-encodes the slug upstream", async () => {
+  let seen;
+  const spy = createServer((req, res) => {
+    seen = req.url;
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const spyWeb = createWeb({ apiUrl: await listen(spy) });
+  const spyBase = await listen(spyWeb);
+  await fetch(`${spyBase}/api/items/a%3Fb%23c%2Fd`);
+  assert.equal(seen, "/items/a%3Fb%23c%2Fd");
+  spyWeb.close();
+  spy.close();
+});
+
+test("reports an unreachable api as 502 on every proxy route", async () => {
+  const lonely = createWeb({ apiUrl: "http://127.0.0.1:9" });
+  const lonelyBase = await listen(lonely);
+  for (const [method, path] of [
+    ["GET", "/api/items"],
+    ["POST", "/api/items"],
+    ["GET", "/api/items/x"],
+  ]) {
+    const res = await fetch(`${lonelyBase}${path}`, {
+      method,
+      ...(method === "POST" ? { body: JSON.stringify({ title: "x" }) } : {}),
+    });
+    assert.equal(res.status, 502, `${method} ${path}`);
+    assert.ok((await res.json()).error);
+  }
   lonely.close();
 });

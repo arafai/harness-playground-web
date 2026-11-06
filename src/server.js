@@ -22,11 +22,34 @@ const PAGE = `<!doctype html>
 </body>
 </html>`;
 
+async function readBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
 /**
  * The playground web app: one page, and a server-side proxy to the api platform, so the
  * browser never needs to reach the API itself.
  */
 export function createWeb({ apiUrl }) {
+  // Forwards one request to the api; status and body pass through verbatim.
+  async function proxy(res, path, { method = "GET", body } = {}) {
+    try {
+      const init = { method };
+      if (body !== undefined) {
+        init.headers = { "content-type": "application/json" };
+        init.body = body;
+      }
+      const upstream = await fetch(`${apiUrl}${path}`, init);
+      res.writeHead(upstream.status, { "content-type": "application/json" });
+      return res.end(await upstream.text());
+    } catch {
+      res.writeHead(502, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: "the api is unreachable" }));
+    }
+  }
+
   return createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/health") {
@@ -38,14 +61,21 @@ export function createWeb({ apiUrl }) {
       return res.end(PAGE);
     }
     if (req.method === "GET" && url.pathname === "/api/slug") {
+      return proxy(res, `/slug?${url.searchParams}`);
+    }
+    if (url.pathname === "/api/items" && req.method === "GET") {
+      return proxy(res, "/items");
+    }
+    if (url.pathname === "/api/items" && req.method === "POST") {
+      return proxy(res, "/items", { method: "POST", body: await readBody(req) });
+    }
+    const itemMatch = /^\/api\/items\/([^/]+)$/.exec(url.pathname);
+    if (req.method === "GET" && itemMatch) {
+      let slug = itemMatch[1];
       try {
-        const upstream = await fetch(`${apiUrl}/slug?${url.searchParams}`);
-        res.writeHead(upstream.status, { "content-type": "application/json" });
-        return res.end(await upstream.text());
-      } catch {
-        res.writeHead(502, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ error: "the api is unreachable" }));
-      }
+        slug = decodeURIComponent(slug);
+      } catch {}
+      return proxy(res, `/items/${encodeURIComponent(slug)}`);
     }
     res.writeHead(404, { "content-type": "application/json" });
     return res.end(JSON.stringify({ error: "not found" }));
