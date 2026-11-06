@@ -1,0 +1,7 @@
+version: 1
+checks:
+  - id: web.eac-2
+    criteria: [EAC-2]
+    runner: playwright
+    paths: [acceptance/web.eac-2.spec.mjs]
+    needs: [api, web]
